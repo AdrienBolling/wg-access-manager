@@ -1,0 +1,1 @@
+from wg_access_manager._metadata import __version__

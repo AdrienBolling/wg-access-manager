@@ -5,7 +5,7 @@ from wg_access_manager.defaults import defaults
 import yaml
 
 PACKAGE_ROOT = os.getenv(
-    "PACKAGE_ROOT", str(defaults["env"]["package_root"])
+    "WG_AM_ROOT", str(defaults["env"]["package_root"])
 )  # Ensure the ENV is read
 
 CONFIG_FILE_NAME = "config.yaml"

@@ -9,8 +9,8 @@ defaults = {
         "package_root": "/opt/wg-access-manager/",
     },
     "config": {
-        "templates_subfolder": "templates/",
-        "data_subfolder": "data/",
+        "templates_dir": "templates/",
+        "data_dir": "data/",
         "users_file": "users.json",
         "services_file": "services.json",
         "permissions_file": "permissions.json",
