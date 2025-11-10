@@ -1,4 +1,16 @@
 from dataclasses import dataclass
+from typing import Iterable
+
+from wg_access_manager.data.base import (
+    User,
+    Service,
+    Permission,
+)
+
+import shlex
+import ipaddress
+import socket
+from pathlib import Path
 
 
 @dataclass
@@ -13,9 +25,67 @@ class NetConfig:
     log_prefix_lan: str = "WG-ACL LAN "
     log_prefix_docker: str = "WG-ACL DOCKER "
     pihole_ip: str  # e.g., "172.20.0.3"
+    lan_cidr: ipaddress.IPv4Network = ipaddress.IPv4Network("192.168.1.0/24")
     default_reject: bool = True
     allow_icmp_on_any_allow: bool = True
     enable_nat_lan_to_vpn: bool = True  # only if you cannot add a LAN route
+
+
+PortSpec = list[tuple[str, int]]
+
+
+def is_ip(s: str) -> bool:
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_name(name_or_ip: str) -> str:
+    """Resolve once at generation time; returns the first IPv4 address."""
+    if is_ip(name_or_ip):
+        return name_or_ip
+    # getent-like resolution; prefer IPv4
+    infos = socket.getaddrinfo(
+        name_or_ip, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+    )
+    if not infos:
+        raise RuntimeError(f"Cannot resolve hostname: {name_or_ip}")
+    return infos[0][4][0]
+
+
+def normalize_ports(ports: None | dict | list) -> PortSpec:
+    """
+    Accepts:
+      - {"tcp":[80,443], "udp":[53]}
+      - ["tcp/80", "udp/53", "443"]
+      - [80, 443]
+      - None -> []
+    Returns: [("tcp",80), ("tcp",443), ("udp",53)]
+    """
+    out: PortSpec = []
+    if ports is None:
+        return out
+    if isinstance(ports, dict):
+        for proto, lst in ports.items():
+            proto_norm = str(proto).lower()
+            for p in lst:
+                out.append((proto_norm, int(p)))
+        return out
+    if isinstance(ports, list):
+        for item in ports:
+            if isinstance(item, int):
+                out.append(("tcp", int(item)))
+            else:
+                s = str(item).strip().lower()
+                if "/" in s:
+                    proto, port = s.split("/", 1)
+                    out.append((proto.strip(), int(port)))
+                else:
+                    out.append(("tcp", int(s)))
+        return out
+    raise TypeError(f"Unsupported ports type: {type(ports)}")
 
 
 class AclBuilder:
@@ -25,16 +95,14 @@ class AclBuilder:
         users: Iterable[User],
         services: Iterable[Service],
         permissions: Iterable[Permission],
-        lan_permissions: Iterable[LanPermission] | None = None,
     ):
         self.cfg = cfg
         self.users = {u.name: u for u in users}
         self.services = {s.name: s for s in services}
         self.permissions = [p for p in permissions if p.allowed]
-        self.lan_permissions = [p for p in (lan_permissions or []) if p.allowed]
 
     # ── Chains UP ─────────────────────────────────────────────────────────────
-    def _prologue_up(self) -> List[str]:
+    def _prologue_up(self) -> list[str]:
         c = self.cfg
         q = shlex.quote
         cmds = [
@@ -74,10 +142,10 @@ class AclBuilder:
         return cmds
 
     # ── VPN↔VPN (wg0→wg0) allows from Permission list ────────────────────────
-    def _vpn_acl_rules(self) -> List[str]:
+    def _vpn_acl_rules(self) -> list[str]:
         c = self.cfg
         q = shlex.quote
-        lines: List[str] = []
+        lines: list[str] = []
         for perm in self.permissions:
             u = self.users.get(perm.user_name)
             s = self.services.get(perm.service_name)
@@ -124,62 +192,74 @@ class AclBuilder:
             )
         return lines
 
-    # ── LAN↔VPN policy: LAN→VPN allowed; VPN→LAN selective ───────────────────
-    def _lan_policy_rules(self) -> List[str]:
+    def _lan_policy_rules(self) -> list[str]:
         c = self.cfg
         q = shlex.quote
-        lines: List[str] = []
+        lines: list[str] = []
+
         # Allow LAN → VPN unconditionally
         lines.append(f'iptables -A {q(c.chain_lan)} -i "$LAN_IF" -o "$WG_IF" -j ACCEPT')
 
-        # Selective VPN → LAN
-        for lp in self.lan_permissions:
-            u = self.users.get(lp.user_name)
-            if not u:
-                raise ValueError(f"Unknown user in LAN permission: {lp.user_name}")
-            dst_ip = resolve_name(lp.dst)
-            ports = normalize_ports(lp.ports)
-            if not ports:
-                # allow all to that LAN host (rare; explicit)
+        # Blanket VPN → LAN for users in the "lan" group
+        # (assumes User has: groups: list[str] | None)
+        for u in self.users.values():
+            groups = getattr(u, "groups", None)
+            if not groups:
+                continue
+            # case-insensitive membership check
+            if any(g.lower() == "lan" for g in groups):
                 lines.append(
-                    f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" -s {u.ip} -d {dst_ip} '
-                    f"-m comment --comment {q('VPN->LAN:' + lp.user_name + '->' + dst_ip + ':all')} -j ACCEPT"
+                    f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" '
+                    f"-s {u.ip} -d {c.lan_cidr} "
+                    f"-m comment --comment {q(f'VPN->LAN blanket: {u.name}')} -j ACCEPT"
                 )
-            else:
-                for proto, port in ports:
-                    proto = proto.lower()
-                    if proto not in ("tcp", "udp"):
-                        raise ValueError(
-                            f"Unsupported proto '{proto}' in LAN permission"
-                        )
-                    lines.append(
-                        f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" -s {u.ip} -d {dst_ip} '
-                        f"-p {proto} --dport {int(port)} "
-                        f"-m comment --comment {q('VPN->LAN:' + lp.user_name + '->' + dst_ip + f':{proto}/{int(port)}')} -j ACCEPT"
-                    )
 
         # Default deny VPN → LAN
         if c.default_reject:
             if c.log_prefix_lan:
                 lines.append(
-                    f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" -m limit --limit 10/min -j LOG --log-prefix {q(c.log_prefix_lan)} --log-level 6'
+                    f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" '
+                    f"-m limit --limit 10/min -j LOG "
+                    f"--log-prefix {q(c.log_prefix_lan)} --log-level 6"
                 )
             lines.append(
-                f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" -j REJECT --reject-with icmp-port-unreachable'
+                f'iptables -A {q(c.chain_lan)} -i "$WG_IF" -o "$LAN_IF" '
+                f"-j REJECT --reject-with icmp-port-unreachable"
             )
+
         return lines
 
     # ── WG↔Docker policy: allow DNS to Pi-hole, deny rest ────────────────────
-    def _docker_policy_rules(self) -> List[str]:
+    def _docker_policy_rules(self) -> list[str]:
         c = self.cfg
         q = shlex.quote
-        lines: List[str] = []
+        lines: list[str] = []
         if c.pihole_ip:
             pihole_ip = resolve_name(c.pihole_ip)
             lines += [
+                # Lines for the DNS ports
                 f'iptables -A {q(c.chain_docker)} -i "$WG_IF" -o "$DOCKER_IF" -d {pihole_ip} -p udp --dport 53 -j ACCEPT',
                 f'iptables -A {q(c.chain_docker)} -i "$WG_IF" -o "$DOCKER_IF" -d {pihole_ip} -p tcp --dport 53 -j ACCEPT',
+                # Lines for the HTTP and HTTPS ports
+                f'iptables -A {q(c.chain_docker)} -i "$WG_IF" -o "$DOCKER_IF" -d {pihole_ip} -p tcp --dport 80 -j ACCEPT',
+                f'iptables -A {q(c.chain_docker)} -i "$WG_IF" -o "$DOCKER_IF" -d {pihole_ip} -p tcp --dport 443 -j ACCEPT',
             ]
+        # Allow Docker → WG unconditionally
+        lines.append(
+            f'iptables -A {q(c.chain_docker)} -i "$DOCKER_IF" -o "$WG_IF" -j ACCEPT'
+        )
+
+        # Blanket WG → Docker for users in the "wg_docker" group
+        for u in self.users.values():
+            groups = getattr(u, "groups", None)
+            if not groups:
+                continue
+            if any(g.lower() == "wg_docker" for g in groups):
+                lines.append(
+                    f'iptables -A {q(c.chain_docker)} -i "$WG_IF" -o "$DOCKER_IF" '
+                    f"-s {u.ip} "
+                    f"-m comment --comment {q(f'WG->Docker blanket: {u.name}')} -j ACCEPT"
+                )
         # Default deny WG → Docker
         if c.default_reject:
             if c.log_prefix_docker:
@@ -192,9 +272,9 @@ class AclBuilder:
         return lines
 
     # ── Optional NAT when you can't add a route on the LAN router ────────────
-    def _nat_rules_up(self) -> List[str]:
+    def _nat_rules_up(self) -> list[str]:
         c = self.cfg
-        lines: List[str] = []
+        lines: list[str] = []
         # LAN → VPN MASQUERADE (last resort)
         if c.enable_nat_lan_to_vpn:
             lines.append(
@@ -210,7 +290,7 @@ class AclBuilder:
         return lines
 
     # ── Chains DOWN (cleanup) ────────────────────────────────────────────────
-    def _epilogue_down(self) -> List[str]:
+    def _epilogue_down(self) -> list[str]:
         c = self.cfg
         q = shlex.quote
         return [
@@ -238,8 +318,8 @@ class AclBuilder:
             "# === End ===",
         ]
 
-    def build_script(self) -> List[str]:
-        lines: List[str] = []
+    def build_script(self) -> list[str]:
+        lines: list[str] = []
         lines += self._prologue_up()
         lines += self._vpn_acl_rules()
         lines += self._lan_policy_rules()
@@ -247,3 +327,10 @@ class AclBuilder:
         lines += self._nat_rules_up()
         lines += self._epilogue_down()
         return lines
+
+
+def write_script(path: str | Path, commands: Iterable[str]) -> Path:
+    p = Path(path)
+    p.write_text("\n".join(commands) + "\n", encoding="utf-8")
+    p.chmod(0o750)
+    return p
