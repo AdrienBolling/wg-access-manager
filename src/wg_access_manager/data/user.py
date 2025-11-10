@@ -14,10 +14,10 @@ import json
 USER_FILE_PATH = os.path.join(
     os.getenv("WG_AM_ROOT"), CONFIG.data_dir, CONFIG.users_file
 )
-SERIALIAZER = CONFIG.get("serializer", "json")
+SERIALIZER = CONFIG.get("serializer", "json")
 
 
-def read_user_table(serializer: str = SERIALIAZER) -> dict[str, dict[str, Any]]:
+def read_user_table(serializer: str = SERIALIZER) -> dict[str, dict[str, Any]]:
     # Read the user_table as a yaml file and return it as a dictionary
     with open(os.path.join(USER_FILE_PATH), mode="r") as f:
         if serializer == "json":
@@ -29,7 +29,7 @@ def read_user_table(serializer: str = SERIALIAZER) -> dict[str, dict[str, Any]]:
 
 
 def save_user_table(
-    table: dict[str, dict[str, Any]], serializer: str = SERIALIAZER
+    table: dict[str, dict[str, Any]], serializer: str = SERIALIZER
 ) -> None:
     with open(os.path.join(USER_FILE_PATH), mode="w") as f:
         if serializer == "json":
@@ -78,6 +78,7 @@ def create_user_record(name: str) -> None:
         "pvkey": pvt_key,
         "pbkey": pub_key,
         "pskey": preshared_key,
+        "last_handshake": None,
     }
     # Save the table back to the user file
     save_user_table(table)

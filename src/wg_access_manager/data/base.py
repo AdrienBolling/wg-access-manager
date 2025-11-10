@@ -5,19 +5,27 @@ from dataclasses import dataclass
 class User:
     name: str
     ip: str
-    private_key: str
-    preshared_key: str
-    public_key: str
+    pvkey: str
+    pskey: str
+    pbkey: str
     last_handshake: str | None = None
 
 
 @dataclass
 class Service:
     name: str
-    folder: str
+    directory: str
     ip: str
-    private_key: str
-    preshared_key: str
-    public_key: str
+    pvkey: str
+    pskey: str
+    pbkey: str
     ports: dict[str]
     last_handshake: str | None = None
+    groups: list[str] | None = None
+
+
+@dataclass
+class Permission:
+    user_name: str
+    service_name: str
+    allowed: bool
