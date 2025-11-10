@@ -10,6 +10,7 @@ import yaml
 import ipaddress as ipad
 import subprocess
 import json
+from wg_access_manager.data.service import read_service_table
 
 USER_FILE_PATH = os.path.join(
     os.getenv("WG_AM_ROOT"), CONFIG.data_dir, CONFIG.users_file
@@ -73,12 +74,19 @@ def create_user_record(name: str) -> None:
     ip = get_next_free_user_ip()
     pvt_key, pub_key, preshared_key = gen_wg_keys()
     table = read_user_table()
+    # Check if the user already exists
+    if name in table.keys():
+        raise KeyError(f"User {name} already exists in user table.")
+    # Check if the name is already used by a service
+    if name in read_service_table().keys():
+        raise KeyError(f"Name {name} is already used by a service.")
     table[name] = {
         "ip": ip,
         "pvkey": pvt_key,
         "pbkey": pub_key,
         "pskey": preshared_key,
         "last_handshake": None,
+        "groups": None,
     }
     # Save the table back to the user file
     save_user_table(table)

@@ -9,6 +9,7 @@ class User:
     pskey: str
     pbkey: str
     last_handshake: str | None = None
+    groups: list[str] | None = None
 
 
 @dataclass

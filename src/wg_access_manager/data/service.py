@@ -14,8 +14,22 @@ import json
 SERVICES_FILE_PATH = os.path.join(
     os.getenv("WG_AM_ROOT"), CONFIG.data_dir, CONFIG.services_file
 )
+USER_FILE_PATH = os.path.join(
+    os.getenv("WG_AM_ROOT"), CONFIG.data_dir, CONFIG.users_file
+)
 
 SERIALIZER = CONFIG.get("serializer", "json")
+
+
+def read_user_table(serializer: str = SERIALIZER) -> dict[str, dict[str, Any]]:
+    # Read the user_table as a yaml file and return it as a dictionary
+    with open(os.path.join(USER_FILE_PATH), mode="r") as f:
+        if serializer == "json":
+            return json.load(fp=f)
+        elif serializer == "yaml":
+            return yaml.safe_load(stream=f)
+        else:
+            raise ValueError(f"Unsupported serializer: {serializer}")
 
 
 def read_service_table(serializer: str = SERIALIZER) -> dict[str, dict[str, Any]]:
@@ -76,6 +90,11 @@ def create_service_record(
     ip = get_next_free_service_ip()
     pvkey, pbkey, pskey = gen_wg_keys()
     table = read_service_table()
+    # Check if the service already exists
+    if name in table.keys():
+        raise KeyError(f"Service {name} already exists in the service table.")
+    if name in read_user_table().keys():
+        raise KeyError(f"Name {name} already exists in the user table.")
     table[name] = {
         "ip": ip,
         "pvkey": pvkey,
